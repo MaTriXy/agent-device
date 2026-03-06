@@ -28,6 +28,8 @@ agent-device app-switcher
 - `open <app> <url>` opens a deep link on iOS.
 - On iOS devices, `http(s)://` URLs open in Safari when no app is active. Custom scheme URLs require an active app in the session.
 - Tenant-scoped daemon runs can pass `--tenant`, `--session-isolation tenant`, `--run-id`, and `--lease-id` to enforce lease admission.
+- Remote daemon clients can pass `--daemon-base-url http(s)://host:port[/base-path]` to skip local daemon discovery/startup and call a remote HTTP daemon directly.
+- Use `--daemon-auth-token <token>` (or `AGENT_DEVICE_DAEMON_AUTH_TOKEN`) when the remote daemon expects the shared daemon token over HTTP; the client sends it in both the JSON-RPC request token and HTTP auth headers.
 
 ```bash
 agent-device open "https://example.com" --platform ios           # open link in web browser
@@ -49,6 +51,22 @@ agent-device devices --platform android --android-device-allowlist emulator-5554
   - iOS: `AGENT_DEVICE_IOS_SIMULATOR_DEVICE_SET` (compat: `IOS_SIMULATOR_DEVICE_SET`)
   - Android: `AGENT_DEVICE_ANDROID_DEVICE_ALLOWLIST` (compat: `ANDROID_DEVICE_ALLOWLIST`)
 - CLI scope flags override environment values.
+
+## Simulator provisioning
+
+```bash
+agent-device ensure-simulator --device "iPhone 16" --platform ios
+agent-device ensure-simulator --device "iPhone 16" --runtime com.apple.CoreSimulator.SimRuntime.iOS-18-4 --ios-simulator-device-set /tmp/tenant-a/simulators
+agent-device ensure-simulator --device "iPhone 16" --ios-simulator-device-set /tmp/tenant-a/simulators --boot
+```
+
+- `ensure-simulator` ensures a named iOS simulator exists inside a device set, creating it via `simctl create` if missing.
+- Requires `--device <name>` (the simulator name / device type, e.g. `"iPhone 16 Pro"`).
+- `--runtime <id>` pins a specific CoreSimulator runtime (e.g. `com.apple.CoreSimulator.SimRuntime.iOS-18-4`). Omit to use the newest compatible runtime.
+- `--boot` boots the simulator after ensuring it exists.
+- Reuse of an existing matching simulator is the default; the command is idempotent.
+- JSON output includes `udid`, `device`, `runtime`, `ios_simulator_device_set`, `created`, and `booted`.
+- Does not require an active session — safe to call before `open`.
 
 ## TV targets
 
@@ -142,6 +160,21 @@ agent-device batch --steps '[{"command":"open","positionals":["settings"]}]'
 
 See [Batching](/agent-device/docs/batching.md) for payload format, response shape, and usage guidelines.
 
+## App install (in-place)
+
+```bash
+agent-device install com.example.app ./build/app.apk --platform android
+agent-device install com.example.app ./build/MyApp.app --platform ios
+```
+
+- `install <app> <path>` installs from binary path without uninstalling first.
+- Supports Android devices/emulators, iOS simulators, and iOS physical devices.
+- Useful for upgrade flows where you want to keep existing app data when supported by the platform.
+- Supported binary formats: Android `.apk`/`.aab`, iOS `.app`/`.ipa`.
+- `.aab` requires `bundletool` in `PATH`, or `AGENT_DEVICE_BUNDLETOOL_JAR=<path-to-bundletool-all.jar>` with `java` in `PATH`.
+- Optional: `AGENT_DEVICE_ANDROID_BUNDLETOOL_MODE=<mode>` overrides bundletool `build-apks --mode` (default: `universal`).
+- `.ipa` installs by extracting `Payload/*.app`; if multiple app bundles exist, `<app>` is used as a bundle id/name hint to select one.
+
 ## App reinstall (fresh state)
 
 ```bash
@@ -152,6 +185,9 @@ agent-device reinstall com.example.app ./build/MyApp.app --platform ios
 - `reinstall <app> <path>` uninstalls and installs in one command.
 - Supports Android devices/emulators, iOS simulators, and iOS physical devices.
 - Useful for login/logout reset flows and deterministic test setup.
+- Supported binary formats: Android `.apk`/`.aab`, iOS `.app`/`.ipa`.
+- `.aab` accepts the same bundletool requirements and optional `AGENT_DEVICE_ANDROID_BUNDLETOOL_MODE` override as `install`.
+- `.ipa` uses `<app>` as the selection hint when multiple `Payload/*.app` bundles are present.
 
 ## Push notification simulation
 
