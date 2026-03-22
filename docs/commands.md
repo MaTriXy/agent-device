@@ -2,6 +2,8 @@
 
 This page summarizes the primary command groups.
 
+For persistent defaults and project-scoped CLI settings, see [Configuration](/agent-device/docs/configuration.md).
+
 ## Navigation
 
 ```bash
@@ -27,13 +29,26 @@ agent-device app-switcher
 - `open <url>` deep links are supported on Android and iOS.
 - `open <app> <url>` opens a deep link on iOS.
 - On iOS devices, `http(s)://` URLs open in Safari when no app is active. Custom scheme URLs require an active app in the session.
+- `AGENT_DEVICE_SESSION` and `AGENT_DEVICE_PLATFORM` can pre-bind a default session/platform for CLI automation runs, so normal commands (`open`, `snapshot`, `press`, `fill`, `screenshot`, `devices`, and `batch`) do not need those flags repeated on every call.
+- A configured `AGENT_DEVICE_SESSION` now implies bound-session lock mode by default. The CLI forwards that policy to the daemon, which enforces the same conflict handling for CLI, typed client, and direct RPC requests.
+- `--session-lock reject|strip` sets the lock policy for a single CLI invocation, including nested batch steps.
+- `AGENT_DEVICE_SESSION_LOCK=reject|strip` sets the default lock policy for bound-session automation runs. The older `--session-locked`, `--session-lock-conflicts`, `AGENT_DEVICE_SESSION_LOCKED`, and `AGENT_DEVICE_SESSION_LOCK_CONFLICTS` forms remain supported as compatibility aliases.
+- Direct RPC callers can pass `meta.lockPolicy` and optional `meta.lockPlatform` on `agent_device.command` requests for the same daemon-enforced behavior.
+- In `batch`, steps that omit `platform` still inherit the parent batch `--platform`; lock-mode defaults do not override that parent setting.
 - Tenant-scoped daemon runs can pass `--tenant`, `--session-isolation tenant`, `--run-id`, and `--lease-id` to enforce lease admission.
 - Remote daemon clients can pass `--daemon-base-url http(s)://host:port[/base-path]` to skip local daemon discovery/startup and call a remote HTTP daemon directly.
 - Use `--daemon-auth-token <token>` (or `AGENT_DEVICE_DAEMON_AUTH_TOKEN`) when the remote daemon expects the shared daemon token over HTTP; the client sends it in both the JSON-RPC request token and HTTP auth headers.
+- `open <app> --remote-config <path> --relaunch` is the canonical remote Metro-backed launch flow for sandbox agents. The remote profile supplies the remote host + Metro settings, `open` prepares Metro locally when needed, derives platform runtime hints, and forwards them inline to the remote daemon before launch.
+- `metro prepare --remote-config <path>` remains available for inspection and debugging. It prints JSON runtime hints to stdout, `--json` wraps them in the standard `{ success, data }` envelope, and `--runtime-file <path>` persists the same payload when callers need an artifact.
+- Android React Native relaunch flows require an installed package name for `open --relaunch`; install/reinstall the APK first, then relaunch by package. `open <apk|aab> --relaunch` is rejected because runtime hints are written through the installed app sandbox.
+- Remote daemon screenshots and recordings are downloaded back to the caller path, so `screenshot page.png` and `record start session.mp4` remain usable when the daemon runs on another host.
 
 ```bash
 agent-device open "https://example.com" --platform ios           # open link in web browser
 agent-device open MyApp "myapp://screen/to" --platform ios       # open deep link to MyApp
+agent-device open com.example.myapp --remote-config ./agent-device.remote.json --relaunch
+agent-device reinstall MyApp /path/to/app-debug.apk --platform android --serial emulator-5554
+agent-device open com.example.myapp --platform android --serial emulator-5554 --session my-session --relaunch
 ```
 
 ## Device isolation scopes
@@ -50,7 +65,21 @@ agent-device devices --platform android --android-device-allowlist emulator-5554
 - Environment equivalents:
   - iOS: `AGENT_DEVICE_IOS_SIMULATOR_DEVICE_SET` (compat: `IOS_SIMULATOR_DEVICE_SET`)
   - Android: `AGENT_DEVICE_ANDROID_DEVICE_ALLOWLIST` (compat: `ANDROID_DEVICE_ALLOWLIST`)
-- CLI scope flags override environment values.
+- CLI scope flags override environment values unless bound-session lock mode is active with `strip`, in which case conflicting per-call selectors are ignored.
+
+## Device discovery
+
+```bash
+agent-device devices
+agent-device devices --platform ios
+agent-device devices --platform android
+agent-device devices --platform ios --ios-simulator-device-set /tmp/tenant-a/simulators
+agent-device devices --platform android --android-device-allowlist emulator-5554,device-1234
+```
+
+- `devices` lists available targets after applying any platform selector or isolation scope flags.
+- Use `--platform` to narrow discovery to iOS/tvOS or Android targets.
+- Use `--ios-simulator-device-set` and `--android-device-allowlist` when you need tenant- or lab-scoped discovery.
 
 ## Simulator provisioning
 
@@ -95,6 +124,30 @@ agent-device get attrs @e1
 - iOS snapshots use XCTest on simulators and physical devices.
 - `diff snapshot` compares the current snapshot with the previous session baseline and then updates baseline.
 
+## Wait and alerts
+
+```bash
+agent-device wait 1500
+agent-device wait text "Welcome back"
+agent-device wait @e12
+agent-device wait 'role="button" label="Continue"' 5000
+agent-device alert
+agent-device alert get
+agent-device alert wait 3000
+agent-device alert accept
+agent-device alert dismiss
+```
+
+- `wait` accepts a millisecond duration, `text <value>`, a snapshot ref (`@eN`), or a selector.
+- `wait <selector> [timeoutMs]` polls until the selector resolves or the timeout expires.
+- `wait @ref [timeoutMs]` requires an existing session snapshot from a prior `snapshot` command.
+- `wait @ref` resolves the ref to its label/text from that stored snapshot, then polls for that text; it does not track the original node identity.
+- Because `wait @ref` is text-based after resolution, duplicate labels can match a different element than the original ref target.
+- `wait` shares the selector/snapshot resolution flow used by `click`, `fill`, `get`, and `is`.
+- `alert` inspects or handles system alerts on iOS simulator targets.
+- `alert` without an action is equivalent to `alert get`.
+- `alert wait [timeout]` waits for an alert to appear before returning it.
+
 ## Interactions
 
 ```bash
@@ -132,6 +185,23 @@ agent-device find label "Email" fill "user@example.com"
 agent-device find role button click
 ```
 
+## Assertions
+
+```bash
+agent-device is visible 'role="button" label="Continue"'
+agent-device is exists 'id="primary-cta"'
+agent-device is hidden 'text="Loading..."'
+agent-device is editable 'id="email"'
+agent-device is selected 'label="Wi-Fi"'
+agent-device is text 'id="greeting"' "Welcome back"
+```
+
+- `is` evaluates UI predicates against a selector expression and exits non-zero on failure.
+- Supported predicates are `visible`, `hidden`, `exists`, `editable`, `selected`, and `text`.
+- `is text <selector> <value>` compares the resolved element text against the expected value.
+- `is` does not accept snapshot refs like `@e3`; use a selector expression instead.
+- `is` accepts the same selector-oriented snapshot flags as `click`, `fill`, `get`, and `wait`.
+
 ## Replay
 
 ```bash
@@ -154,9 +224,10 @@ agent-device batch --steps '[{"command":"open","positionals":["settings"]}]'
 ```
 
 - `batch` runs a JSON array of steps in a single daemon request.
-- each step has `command`, optional `positionals`, and optional `flags`.
-- stop-on-first-error is the supported behavior (`--on-error stop`).
-- use `--max-steps <n>` to tighten per-request safety limits.
+- Each step has `command`, optional `positionals`, and optional `flags`.
+- Stop-on-first-error is the supported behavior (`--on-error stop`).
+- Use `--max-steps <n>` to tighten per-request safety limits.
+- Batch requests inherit the same daemon lock policy and session binding metadata as the parent command.
 
 See [Batching](/agent-device/docs/batching.md) for payload format, response shape, and usage guidelines.
 
@@ -170,6 +241,7 @@ agent-device install com.example.app ./build/MyApp.app --platform ios
 - `install <app> <path>` installs from binary path without uninstalling first.
 - Supports Android devices/emulators, iOS simulators, and iOS physical devices.
 - Useful for upgrade flows where you want to keep existing app data when supported by the platform.
+- Remote daemons automatically upload local app artifacts for `install`; prefix the path with `remote:` to use a daemon-side path verbatim.
 - Supported binary formats: Android `.apk`/`.aab`, iOS `.app`/`.ipa`.
 - `.aab` requires `bundletool` in `PATH`, or `AGENT_DEVICE_BUNDLETOOL_JAR=<path-to-bundletool-all.jar>` with `java` in `PATH`.
 - Optional: `AGENT_DEVICE_ANDROID_BUNDLETOOL_MODE=<mode>` overrides bundletool `build-apks --mode` (default: `universal`).
@@ -185,9 +257,23 @@ agent-device reinstall com.example.app ./build/MyApp.app --platform ios
 - `reinstall <app> <path>` uninstalls and installs in one command.
 - Supports Android devices/emulators, iOS simulators, and iOS physical devices.
 - Useful for login/logout reset flows and deterministic test setup.
+- Remote daemons automatically upload local app artifacts for `reinstall`; prefix the path with `remote:` to use a daemon-side path verbatim.
 - Supported binary formats: Android `.apk`/`.aab`, iOS `.app`/`.ipa`.
 - `.aab` accepts the same bundletool requirements and optional `AGENT_DEVICE_ANDROID_BUNDLETOOL_MODE` override as `install`.
 - `.ipa` uses `<app>` as the selection hint when multiple `Payload/*.app` bundles are present.
+
+## App install from source URL
+
+```bash
+agent-device install-from-source https://example.com/builds/app.apk --platform android
+agent-device install-from-source https://example.com/builds/MyApp.ipa --platform ios --header "authorization: Bearer TOKEN"
+```
+
+- `install-from-source <url>` installs from a URL source through the normal daemon artifact flow.
+- Repeat `--header <name:value>` for authenticated or signed artifact requests.
+- Supports the same device coverage as `install`: Android devices/emulators, iOS simulators, and iOS physical devices.
+- `--retain-paths` keeps retained materialized artifact paths after install, and `--retention-ms <ms>` sets their TTL.
+- URL downloads follow the same `installFromSource()` safety checks and host restrictions as the JS client API.
 
 ## Push notification simulation
 
@@ -385,6 +471,42 @@ tail -50 ~/.agent-device/sessions/default/app.log
 - Physical-device capture defaults to uncapped (max available) FPS.
 
 - `--fps <n>` (1-120) applies to physical iOS device recording as an explicit FPS cap.
+
+## Tracing
+
+```bash
+agent-device trace start
+agent-device trace start session.trace
+agent-device trace stop
+agent-device trace stop session.trace
+```
+
+- `trace start [path]` begins trace-log capture for the active session.
+- `trace stop [path]` stops capture and optionally writes or finalizes the trace artifact at the provided path.
+- `trace` is intended for lower-level session diagnostics than `record` or `logs`.
+
+## Remote Metro workflow
+
+```bash
+agent-device open com.example.myapp --remote-config ./agent-device.remote.json --relaunch
+agent-device snapshot -i --remote-config ./agent-device.remote.json
+agent-device metro prepare --remote-config ./agent-device.remote.json --json
+```
+
+- `--remote-config <path>` points to a remote workflow profile that captures stable host + Metro settings.
+- `open --remote-config ... --relaunch` is the main agent flow. It prepares Metro locally, derives platform runtime hints, and forwards them inline to the remote daemon before launch.
+- `snapshot`, `press`, `fill`, `screenshot`, and other normal commands can reuse the same `--remote-config` profile so agents do not need to repeat remote host/session selectors inline.
+- `metro prepare --remote-config ...` remains the inspection/debug path and can still write a `--runtime-file <path>` artifact when needed.
+
+## Session inspection
+
+```bash
+agent-device session list
+agent-device session list --json
+```
+
+- `session list` shows active daemon sessions and their tracked device/app context.
+- Use `--json` when you want to inspect or script against the raw session metadata.
 
 ## iOS device prerequisites
 
