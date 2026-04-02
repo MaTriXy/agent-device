@@ -6,6 +6,10 @@
 npm install -g agent-device
 ```
 
+Interactive CLI runs periodically check for a newer published `agent-device` package in the background. When an upgrade is available, the CLI suggests reinstalling the package globally; that also refreshes the bundled `skills/` directory shipped with the release.
+
+Set `AGENT_DEVICE_NO_UPDATE_NOTIFIER=1` to disable the notice.
+
 ## Without installing
 
 ```bash
@@ -17,6 +21,13 @@ npx agent-device open Settings --platform ios
 - Node.js 22+
 - Xcode for iOS simulator/device automation (`simctl` + `devicectl`)
 - Android SDK / ADB for Android
+- On macOS desktop targets, Swift 5.9+ / Xcode command-line tools are used to build the local `agent-device-macos-helper` on first use from source checkouts
+
+## macOS desktop notes
+
+- The macOS desktop path uses a local `agent-device-macos-helper` for permission checks (`settings permission ...`), alert handling, and helper-backed desktop snapshot surfaces (`frontmost-app`, `desktop`, `menubar`).
+- Source checkouts build the helper lazily on first use and cache it under `~/.agent-device/macos-helper/current/`.
+- Release distribution should ship a stable signed/notarized helper build so macOS trust/TCC state is tied to a durable code signature instead of an ad-hoc local binary.
 
 ## iOS physical device prerequisites
 

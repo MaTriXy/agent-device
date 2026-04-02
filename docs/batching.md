@@ -40,6 +40,7 @@ Notes:
 
 - `positionals` is optional (defaults to `[]`).
 - `flags` is optional (defaults to `{}`).
+- Unknown top-level step fields are rejected. Supported keys are `command`, `positionals`, `flags`, and `runtime`.
 - nested `batch` and `replay` steps are rejected.
 - `--on-error stop` is the supported behavior.
 
@@ -63,6 +64,8 @@ Success:
   }
 }
 ```
+
+In non-JSON mode, `batch` also prints a short per-step summary after the overall completion line.
 
 Failure:
 
@@ -95,6 +98,40 @@ Failure:
 - Prefer `--steps-file` over inline JSON.
 - Keep batches moderate (about 5-20 steps).
 - Replan from the failing step using `details.step` and `details.partialResults`.
+
+## Canonical recipes
+
+Open app -> open thread -> type -> send
+
+```json
+[
+  { "command": "open", "positionals": ["com.example.chat"], "flags": { "platform": "android" } },
+  { "command": "wait", "positionals": ["text", "Inbox", "3000"], "flags": {} },
+  { "command": "press", "positionals": ["label=\"Inbox\" role=button"], "flags": {} },
+  { "command": "press", "positionals": ["label=\"Adam Horodyski\""], "flags": {} },
+  {
+    "command": "fill",
+    "positionals": ["label=\"Message\" role=text-field", "filed the expense"],
+    "flags": {}
+  },
+  { "command": "press", "positionals": ["label=\"Send\" role=button"], "flags": {} },
+  { "command": "wait", "positionals": ["text", "filed the expense", "3000"], "flags": {} }
+]
+```
+
+Open app -> open action menu -> choose option -> verify
+
+```json
+[
+  { "command": "open", "positionals": ["com.example.app"], "flags": { "platform": "android" } },
+  { "command": "wait", "positionals": ["text", "Home", "3000"], "flags": {} },
+  { "command": "press", "positionals": ["label=\"More actions\" role=button"], "flags": {} },
+  { "command": "wait", "positionals": ["text", "Camera scan", "2000"], "flags": {} },
+  { "command": "press", "positionals": ["label=\"Camera scan\""], "flags": {} },
+  { "command": "wait", "positionals": ["text", "Expense created", "15000"], "flags": {} },
+  { "command": "is", "positionals": ["visible", "label=\"Expense created\""], "flags": {} }
+]
+```
 
 ## Stale accessibility tree risk
 

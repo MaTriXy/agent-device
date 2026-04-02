@@ -21,16 +21,18 @@ For exploratory QA and bug-hunting workflows, see `skills/dogfood/SKILL.md` in t
 
 ## Platform support highlights
 
-- iOS core runner commands: `snapshot`, `diff snapshot`, `wait`, `click`, `fill`, `get`, `is`, `find`, `press`, `long-press`, `focus`, `type`, `scroll`, `scrollintoview`, `back`, `home`, `app-switcher`, `open` (app), `close`, `screenshot`, `apps`, `appstate`, `install`, `install-from-source`, `reinstall`, `trigger-app-event`.
+- iOS core runner commands: `snapshot`, `snapshot --diff`, `diff snapshot`, `wait`, `click`, `fill`, `get`, `is`, `find`, `press`, `long-press`, `focus`, `type`, `scroll`, `scrollintoview`, `back`, `home`, `rotate`, `app-switcher`, `open` (app), `close`, `screenshot`, `apps`, `appstate`, `install`, `install-from-source`, `reinstall`, `trigger-app-event`.
 - iOS `appstate` is session-scoped on the selected target device.
-- iOS simulator-only: `alert`, `pinch`, `settings`, `push`, `clipboard`.
-- Session performance metrics: `perf`/`metrics` is available on iOS and Android and currently reports startup timing sampled from `open` command round-trip duration.
+- iOS/tvOS simulator-only: `settings`, `push`, `clipboard`.
+- Apple simulators and macOS desktop app sessions: `alert`, `pinch`.
+- Session performance metrics: `perf`/`metrics` is available on iOS, macOS, and Android. Startup timing comes from `open` command round-trip duration. Android app sessions and Apple app sessions on macOS or iOS simulators also expose CPU and memory snapshots when an app identifier is available in the session.
 - iOS `record` supports simulators and physical devices.
   - Simulators use native `simctl io ... recordVideo`.
   - Physical devices use runner screenshot capture (`XCUIScreen.main.screenshot()` frames) stitched into MP4, so FPS is best-effort (not guaranteed 60 even with `--fps 60`).
   - Physical-device recording requires an active app session context (`open <app>` first).
-  - Physical-device recording defaults to uncapped (max available) FPS and supports `--fps` caps.
-- Android supports the same core interaction set, plus `push` notification simulation, `clipboard read/write`, and `keyboard status|get|dismiss` via adb shell commands.
+  - Physical-device recording defaults to 15 FPS and supports `--fps` caps.
+- Android supports the same core interaction set, plus `rotate`, `push` notification simulation, `clipboard read/write`, and `keyboard status|get|dismiss`.
+- iOS supports `keyboard dismiss` through the XCTest runner when the on-screen keyboard is visible.
 - App-event triggers are available on iOS and Android through app-defined deep-link hooks (`trigger-app-event`), using active session context or explicit device selectors.
 
 ## Architecture (high level)
@@ -126,6 +128,7 @@ Notes:
 
 - `positionals` is optional (defaults to `[]`).
 - `flags` is optional (defaults to `{}`).
+- Unknown top-level step fields are rejected. Supported keys are `command`, `positionals`, `flags`, and `runtime`.
 - nested `batch` and `replay` steps are rejected.
 - `--on-error stop` is the supported behavior.
 
@@ -149,6 +152,8 @@ Success:
   }
 }
 ```
+
+In non-JSON mode, `batch` also prints a short per-step summary after the overall completion line.
 
 Failure:
 
@@ -181,6 +186,40 @@ Failure:
 - Prefer `--steps-file` over inline JSON.
 - Keep batches moderate (about 5-20 steps).
 - Replan from the failing step using `details.step` and `details.partialResults`.
+
+## Canonical recipes
+
+Open app -> open thread -> type -> send
+
+```json
+[
+  { "command": "open", "positionals": ["com.example.chat"], "flags": { "platform": "android" } },
+  { "command": "wait", "positionals": ["text", "Inbox", "3000"], "flags": {} },
+  { "command": "press", "positionals": ["label=\"Inbox\" role=button"], "flags": {} },
+  { "command": "press", "positionals": ["label=\"Adam Horodyski\""], "flags": {} },
+  {
+    "command": "fill",
+    "positionals": ["label=\"Message\" role=text-field", "filed the expense"],
+    "flags": {}
+  },
+  { "command": "press", "positionals": ["label=\"Send\" role=button"], "flags": {} },
+  { "command": "wait", "positionals": ["text", "filed the expense", "3000"], "flags": {} }
+]
+```
+
+Open app -> open action menu -> choose option -> verify
+
+```json
+[
+  { "command": "open", "positionals": ["com.example.app"], "flags": { "platform": "android" } },
+  { "command": "wait", "positionals": ["text", "Home", "3000"], "flags": {} },
+  { "command": "press", "positionals": ["label=\"More actions\" role=button"], "flags": {} },
+  { "command": "wait", "positionals": ["text", "Camera scan", "2000"], "flags": {} },
+  { "command": "press", "positionals": ["label=\"Camera scan\""], "flags": {} },
+  { "command": "wait", "positionals": ["text", "Expense created", "15000"], "flags": {} },
+  { "command": "is", "positionals": ["visible", "label=\"Expense created\""], "flags": {} }
+]
+```
 
 ## Stale accessibility tree risk
 
@@ -297,25 +336,37 @@ agent-device boot --platform ios
 agent-device boot --platform android
 agent-device boot --platform android --device Pixel_9_Pro_XL --headless
 agent-device open [app|url] [url]
+agent-device open --platform macos --surface frontmost-app
+agent-device open --platform macos --surface desktop
 agent-device close [app]
 agent-device back
+agent-device back --in-app
+agent-device back --system
 agent-device home
+agent-device rotate portrait
+agent-device rotate landscape-left
 agent-device app-switcher
 ```
 
 - `boot` ensures the selected target is ready without launching an app.
 - `boot` requires either an active session or an explicit device selector.
-- `--platform apple` is an alias for the iOS/tvOS backend.
-- Use `--target mobile|tv` with `--platform` (required) to select phone/tablet vs TV-class devices (`AndroidTV`, `tvOS`).
+- `--platform apple` is an alias for the Apple automation backend (`ios`, `tvOS`, `macOS` selection).
+- Use `--target mobile|tv|desktop` with `--platform` (required) to select phone/tablet vs TV-class vs desktop-class targets.
 - `boot` is mainly needed when starting a new session and `open` fails because no booted simulator/emulator is available.
 - Android: `boot --platform android --device <avd-name>` launches that emulator in GUI mode when needed.
 - Android: add `--headless` to launch without opening a GUI window.
 - `open [app|url] [url]` already boots/activates the selected target when needed.
 - `open <url>` deep links are supported on Android and iOS.
 - `open <app> <url>` opens a deep link on iOS.
+- `open --platform macos --surface app|frontmost-app|desktop|menubar` selects the macOS session surface explicitly. `app` is the default when an app argument is provided.
+- `back` now defaults to app-owned back navigation. On Apple targets that means visible in-app back UI only. On Android this currently maps to the same back keyevent because Android routes in-app back through that platform event.
+- `back --in-app` is an explicit alias for the default app-owned behavior.
+- `back --system` asks for system back input explicitly. On Android this is the normal back keyevent. On iOS and tvOS it uses the platform back gesture or Siri Remote menu action. On macOS, where there is no generic system back input, `back --system` reports unavailable instead of falling back to app-owned navigation.
+- `rotate <orientation>` forces a mobile device into `portrait`, `portrait-upside-down`, `landscape-left`, or `landscape-right`.
+- `rotate` is supported on iOS and Android mobile targets. macOS and tvOS do not expose it.
 - On iOS devices, `http(s)://` URLs open in Safari when no app is active. Custom scheme URLs require an active app in the session.
 - `AGENT_DEVICE_SESSION` and `AGENT_DEVICE_PLATFORM` can pre-bind a default session/platform for CLI automation runs, so normal commands (`open`, `snapshot`, `press`, `fill`, `screenshot`, `devices`, and `batch`) do not need those flags repeated on every call.
-- A configured `AGENT_DEVICE_SESSION` now implies bound-session lock mode by default. The CLI forwards that policy to the daemon, which enforces the same conflict handling for CLI, typed client, and direct RPC requests.
+- A configured `AGENT_DEVICE_SESSION` implies bound-session lock mode by default. The CLI forwards that policy to the daemon, which enforces the same conflict handling for CLI, typed client, and direct RPC requests.
 - `--session-lock reject|strip` sets the lock policy for a single CLI invocation, including nested batch steps.
 - `AGENT_DEVICE_SESSION_LOCK=reject|strip` sets the default lock policy for bound-session automation runs. The older `--session-locked`, `--session-lock-conflicts`, `AGENT_DEVICE_SESSION_LOCKED`, and `AGENT_DEVICE_SESSION_LOCK_CONFLICTS` forms remain supported as compatibility aliases.
 - Direct RPC callers can pass `meta.lockPolicy` and optional `meta.lockPlatform` on `agent_device.command` requests for the same daemon-enforced behavior.
@@ -331,6 +382,8 @@ agent-device app-switcher
 ```bash
 agent-device open "https://example.com" --platform ios           # open link in web browser
 agent-device open MyApp "myapp://screen/to" --platform ios       # open deep link to MyApp
+agent-device back --platform ios                                 # tap visible app back UI only
+agent-device back --system --platform ios                        # use edge-swipe or remote back action
 agent-device open com.example.myapp --remote-config ./agent-device.remote.json --relaunch
 agent-device reinstall MyApp /path/to/app-debug.apk --platform android --serial emulator-5554
 agent-device open com.example.myapp --platform android --serial emulator-5554 --session my-session --relaunch
@@ -363,7 +416,7 @@ agent-device devices --platform android --android-device-allowlist emulator-5554
 ```
 
 - `devices` lists available targets after applying any platform selector or isolation scope flags.
-- Use `--platform` to narrow discovery to iOS/tvOS or Android targets.
+- Use `--platform` to narrow discovery to Apple-family (`ios`, `tvOS`, `macOS`) or Android targets.
 - Use `--ios-simulator-device-set` and `--android-device-allowlist` when you need tenant- or lab-scoped discovery.
 
 ## Simulator provisioning
@@ -397,10 +450,65 @@ agent-device screenshot apple-tv.png --platform ios --target tv
 - On tvOS, runner `back`/`home`/`app-switcher` map to Siri Remote actions (`menu`, `home`, double-home).
 - tvOS follows iOS simulator-only command semantics for helpers like `pinch`, `settings`, and `push`.
 
+## Desktop targets
+
+```bash
+agent-device devices --platform macos
+agent-device open TextEdit --platform macos
+agent-device open --platform macos --surface desktop
+agent-device snapshot -i --platform apple --target desktop
+```
+
+- `--platform macos` selects the host Mac as a `desktop` target.
+- `--platform apple --target desktop` selects the same macOS backend through the Apple-family alias.
+- Use `app` sessions for normal app control: `open`, `snapshot`, `click`, `fill`, `press`, `scroll`, `back`, `screenshot`, `record`.
+- Use `frontmost-app`, `desktop`, and `menubar` when you need to inspect desktop-global UI before choosing one app.
+- `open --platform macos --surface frontmost-app` inspects the currently focused app without naming it first.
+- `open --platform macos --surface desktop` inspects visible windows across the desktop.
+- `open --platform macos --surface menubar` inspects the active app menu bar and system menu extras.
+- `open <app> --platform macos --surface menubar` targets one menu bar app's extras bar, which is useful for status-item apps.
+- Status-item apps often expose little or no useful UI through the default macOS `app` surface. Prefer `--surface menubar` for discovery when the app lives in the top menu bar.
+- Use `frontmost-app`, `desktop`, and `menubar` mainly for `snapshot`, `get`, `is`, and `wait`.
+- If you inspect with `desktop` or `menubar` and then need to click or fill inside one app, open that app in a normal `app` session.
+- macOS also supports `clipboard read|write`, `trigger-app-event`, `logs`, `network dump`, `alert`, `pinch` in app sessions, `settings appearance`, and `settings permission <grant|reset> <accessibility|screen-recording|input-monitoring>`.
+- In macOS app sessions, `screenshot` captures the target app window bounds rather than the full desktop.
+- Prefer selector or `@ref`-driven interactions on macOS. Window position can shift between runs, so raw x/y point commands are less stable than snapshot-derived targets.
+- Use `click --button secondary` for context menus on macOS, then run `snapshot -i` again.
+- Mobile-only helpers remain unsupported on macOS: `boot`, `home`, `rotate`, `app-switcher`, `install`, `reinstall`, `install-from-source`, and `push`.
+
+Recommended loops:
+
+```bash
+# One app, full interaction
+agent-device open TextEdit --platform macos
+agent-device snapshot -i
+agent-device fill @e3 "hello"
+agent-device screenshot textedit.png
+agent-device close
+
+# Desktop-global inspection first
+agent-device open --platform macos --surface desktop
+agent-device snapshot -i
+agent-device is visible 'role="window" label="Notes"'
+agent-device screenshot desktop.png --fullscreen
+agent-device close
+
+# Menubar / menu-extra inspection
+agent-device open --platform macos --surface menubar
+agent-device snapshot -i
+agent-device wait 'label~="Wi-Fi|Control Center|Battery"'
+agent-device close
+
+# Targeted menu bar app inspection
+agent-device open MenuBarApp --platform macos --surface menubar
+agent-device snapshot -i
+agent-device close
+```
+
 ## Snapshot and inspect
 
 ```bash
-agent-device snapshot [-i] [-c] [-d <depth>] [-s <scope>] [--raw]
+agent-device snapshot [--diff] [-i] [-c] [-d <depth>] [-s <scope>] [--raw]
 agent-device diff snapshot [-i] [-c] [-d <depth>] [-s <scope>] [--raw]
 agent-device get text @e1
 agent-device get attrs @e1
@@ -408,6 +516,7 @@ agent-device get attrs @e1
 
 - iOS snapshots use XCTest on simulators and physical devices.
 - `diff snapshot` compares the current snapshot with the previous session baseline and then updates baseline.
+- `snapshot --diff` is an alias for `diff snapshot`.
 
 ## Wait and alerts
 
@@ -429,17 +538,21 @@ agent-device alert dismiss
 - `wait @ref` resolves the ref to its label/text from that stored snapshot, then polls for that text; it does not track the original node identity.
 - Because `wait @ref` is text-based after resolution, duplicate labels can match a different element than the original ref target.
 - `wait` shares the selector/snapshot resolution flow used by `click`, `fill`, `get`, and `is`.
-- `alert` inspects or handles system alerts on iOS simulator targets.
+- `alert` inspects or handles system alerts on iOS simulator and macOS desktop targets.
 - `alert` without an action is equivalent to `alert get`.
 - `alert wait [timeout]` waits for an alert to appear before returning it.
+- If an iOS permission sheet is visible in `snapshot` or `screenshot` but `alert accept` reports no alert, fall back to a scoped `snapshot -i -s "<visible label>"` plus `press @ref`; not every simulator permission surface is exposed as a native XCTest alert.
 
 ## Interactions
 
 ```bash
 agent-device click @e1
+agent-device click @e1 --button secondary   # macOS secondary click / context menu
 agent-device focus @e2
 agent-device fill @e2 "text"          # Clear then type
+agent-device fill @e2 "search" --delay-ms 80
 agent-device type "text"              # Type into focused field without clearing
+agent-device type "query" --delay-ms 80
 agent-device press 300 500
 agent-device press 300 500 --count 12 --interval-ms 45
 agent-device press 300 500 --count 6 --hold-ms 120 --interval-ms 30 --jitter-px 2
@@ -447,20 +560,33 @@ agent-device swipe 540 1500 540 500 120
 agent-device swipe 540 1500 540 500 120 --count 8 --pause-ms 30 --pattern ping-pong
 agent-device longpress 300 500 800
 agent-device scroll down 0.5
+agent-device scroll down --pixels 320
 agent-device scrollintoview "Sign in"
+agent-device scrollintoview "Sign in" --max-scrolls 6
 agent-device scrollintoview @e42
-agent-device pinch 2.0          # zoom in 2x (iOS simulator)
-agent-device pinch 0.5 200 400 # zoom out at coordinates (iOS simulator)
+agent-device pinch 2.0          # zoom in 2x (Apple simulator or macOS app session)
+agent-device pinch 0.5 200 400 # zoom out at coordinates (Apple simulator or macOS app session)
 ```
 
 `fill` clears then types. `type` does not clear.
+`type` accepts text only. Do not pass `@ref` to `type`; use `fill @ref "text"` to target a field directly, or `press @ref` then `type "text"` to append in the focused field.
+Use `--delay-ms` on `type` or `fill` for debounced search fields and search-as-you-type inputs that miss characters when text is injected too quickly.
+Delayed typing prefers paced character entry over clipboard-style fallbacks so the target field still receives incremental updates.
 On Android, `fill` also verifies text and performs one clear-and-retry pass on mismatch.
 Some Android images cannot enter non-ASCII text over shell input; in that case use a trusted ADB keyboard IME and verify APK checksum/signature before install.
+`click --button secondary` is the desktop context-menu flow on macOS.
+`click --button middle` is reserved for future runner support and currently returns an explicit unsupported-operation error on macOS.
 `swipe` accepts an optional `durationMs` argument (default `250ms`, range `16..10000`).
 On iOS, swipe duration is clamped to a safe range (`16..60ms`) to avoid longpress side effects.
-`scrollintoview` accepts plain text or a snapshot ref (`@eN`); ref mode uses best-effort geometry-based scrolling without post-scroll verification. Run `snapshot` again before follow-up `@ref` commands.
+`scroll` accepts either a relative amount (`0.5` means roughly half of the viewport on that axis) or `--pixels <n>` for a fixed-distance gesture. Large distances are clamped to the usable drag band so the gesture stays reliable across Android, iOS, and macOS.
+`scrollintoview` accepts plain text or a snapshot ref (`@eN`).
+Use `--max-scrolls <n>` to cap the number of scroll gestures explicitly.
+When omitted, Apple text/ref paths default to `48` scrolls; Android text mode defaults to `8` because each attempt re-dumps the full UI hierarchy.
+Ref mode re-snapshots after each swipe, returns a refreshed `currentRef` when it can track the target, and stops early when the target enters the safe viewport band or scrolling stops making progress.
+Default snapshot text output is visible-first, so off-screen interactive content is summarized instead of shown as tappable refs.
+`press @ref` and `fill @ref` fail fast when the target is off-screen; use `scrollintoview @ref` first, then retry with the returned `currentRef` or a fresh snapshot.
 `longpress` is supported on iOS and Android.
-`pinch` is iOS simulator-only.
+`pinch` is supported on Apple simulators and macOS app sessions.
 
 ## Find (semantic)
 
@@ -483,6 +609,9 @@ agent-device is text 'id="greeting"' "Welcome back"
 
 - `is` evaluates UI predicates against a selector expression and exits non-zero on failure.
 - Supported predicates are `visible`, `hidden`, `exists`, `editable`, `selected`, and `text`.
+- `is visible` checks whether the resolved element is present in the current visible snapshot viewport. A node without its own rect still passes when a visible ancestor within the viewport provides the on-screen geometry.
+- `is exists` only checks whether the selector matches in the current snapshot.
+- `wait text` is a text-presence wait, not a hittability assertion.
 - `is text <selector> <value>` compares the resolved element text against the expected value.
 - `is` does not accept snapshot refs like `@e3`; use a selector expression instead.
 - `is` accepts the same selector-oriented snapshot flags as `click`, `fill`, `get`, and `wait`.
@@ -492,10 +621,17 @@ agent-device is text 'id="greeting"' "Welcome back"
 ```bash
 agent-device open Settings --platform ios --session e2e --save-script [path]
 agent-device replay ./session.ad      # Run deterministic replay from .ad script
+agent-device test ./suite             # Run every .ad file in a folder or glob serially
+agent-device test ./suite --timeout 60000 --retries 1
 agent-device replay -u ./session.ad   # Update selector drift and rewrite .ad script in place
 ```
 
 - `replay` runs deterministic `.ad` scripts.
+- `test` runs one or more `.ad` scripts as a serial suite from files, directories, or glob inputs.
+- `test --platform <platform>` filters suite files by `context platform=...` metadata instead of overriding the script target.
+- `test --timeout <ms>` and `test --retries <n>` apply per script attempt; `context timeout=...` and `context retries=...` can be declared inside the `.ad` header. Retries are capped at `3`, duplicate metadata keys are rejected, and timeouts are cooperative.
+- `test --artifacts-dir <path>` overrides the default suite artifact root at `.agent-device/test-artifacts`.
+- `test` prints failures and flaky passed-on-retry tests by default, and prints a short `Running replay suite...` line before dispatch; add `--verbose` to print pass and skip lines too.
 - `replay -u` updates stale recorded actions and rewrites the same script.
 - `--save-script` records a replay script on `close`; optional path is a file path and parent directories are created.
 
@@ -509,10 +645,12 @@ agent-device batch --steps '[{"command":"open","positionals":["settings"]}]'
 ```
 
 - `batch` runs a JSON array of steps in a single daemon request.
-- Each step has `command`, optional `positionals`, and optional `flags`.
+- Each step has `command`, optional `positionals`, optional `flags`, and optional `runtime`.
+- Unknown top-level step fields are rejected.
 - Stop-on-first-error is the supported behavior (`--on-error stop`).
 - Use `--max-steps <n>` to tighten per-request safety limits.
 - Batch requests inherit the same daemon lock policy and session binding metadata as the parent command.
+- In non-JSON mode, successful batches print a short per-step summary.
 
 See [Batching](/agent-device/docs/batching.md) for payload format, response shape, and usage guidelines.
 
@@ -583,10 +721,12 @@ agent-device trigger-app-event screenshot_taken '{"source":"qa"}'
 
 - `trigger-app-event <event> [payloadJson]` dispatches app-defined events via deep link.
 - `trigger-app-event` requires either an active session or explicit device selectors (`--platform`, `--device`, `--udid`, `--serial`).
+- On macOS, use `AGENT_DEVICE_MACOS_APP_EVENT_URL_TEMPLATE` to override the desktop deep-link template.
 - On iOS physical devices, custom-scheme deep links require active app context (open app first in the session).
 - Configure one of:
   - `AGENT_DEVICE_APP_EVENT_URL_TEMPLATE`
   - `AGENT_DEVICE_IOS_APP_EVENT_URL_TEMPLATE`
+  - `AGENT_DEVICE_MACOS_APP_EVENT_URL_TEMPLATE`
   - `AGENT_DEVICE_ANDROID_APP_EVENT_URL_TEMPLATE`
 - Template placeholders: `{event}`, `{payload}`, `{platform}`.
 - Example template: `myapp://agent-device/event?name={event}&payload={payload}`.
@@ -619,16 +759,23 @@ agent-device settings permission grant camera
 agent-device settings permission deny microphone
 agent-device settings permission grant photos limited
 agent-device settings permission reset notifications
+agent-device settings permission grant accessibility --platform macos
+agent-device settings permission reset screen-recording --platform macos
 ```
 
-- iOS `settings` support is simulator-only.
-- `settings appearance` maps to iOS simulator appearance and Android night mode.
+- iOS `settings` support is simulator-only except for `settings appearance` and the macOS permission subset on macOS.
+- macOS supports only `settings appearance <light|dark|toggle>` and `settings permission <grant|reset> <accessibility|screen-recording|input-monitoring>`.
+- `settings wifi|airplane|location` remain intentionally unsupported on macOS.
+- `settings appearance` maps to macOS appearance, iOS simulator appearance, and Android night mode.
 - Face ID and Touch ID controls are iOS simulator-only.
 - Fingerprint simulation is supported on Android targets where `cmd fingerprint` or `adb emu finger` is available.
   On physical Android devices, only `cmd fingerprint` is attempted.
 - Permission actions are scoped to the active session app.
 - iOS permission targets: `camera`, `microphone`, `photos` (`full` or `limited`), `contacts`, `notifications`.
 - Android permission targets: `camera`, `microphone`, `photos`, `contacts`, `notifications`.
+- macOS permission targets: `accessibility`, `screen-recording`, `input-monitoring`.
+- On macOS, `settings permission grant ...` checks/request access and opens System Settings guidance when needed; it does not silently grant TCC permissions.
+- On macOS, `settings permission deny ...` is intentionally unsupported.
 - Android uses `pm grant|revoke` for runtime permissions (`reset` maps to revoke) and `appops` for notifications.
 - `full|limited` mode is supported only for iOS `photos`; other targets reject mode.
 - Use `match`/`nonmatch` to simulate valid/invalid Face ID, Touch ID, and Android fingerprint outcomes.
@@ -658,10 +805,10 @@ agent-device clipboard write ""   # clear clipboard
 - `clipboard read` returns clipboard text for the selected target.
 - `clipboard write <text>` updates clipboard text on the selected target.
 - Works with an active session device or explicit selectors (`--platform`, `--device`, `--udid`, `--serial`).
-- Supported on Android emulator/device and iOS simulator.
+- Supported on macOS, Android emulator/device, and iOS simulator.
 - iOS physical devices currently return `UNSUPPORTED_OPERATION` for clipboard commands.
 
-## Keyboard (Android)
+## Keyboard
 
 ```bash
 agent-device keyboard status
@@ -669,10 +816,12 @@ agent-device keyboard get
 agent-device keyboard dismiss
 ```
 
-- `keyboard status` (or `keyboard get`) returns keyboard visibility and best-effort input type classification.
-- `keyboard dismiss` dismisses keyboard with Android back keyevent only when the keyboard is visible, then confirms hidden state.
+- `keyboard status` (or `keyboard get`) returns keyboard visibility and best-effort input type classification on Android.
+- `keyboard dismiss` attempts a non-navigation keyboard dismissal on Android and a native dismiss gesture/control on iOS, then confirms the keyboard is hidden.
+- If the keyboard remains visible after the platform-native dismiss path, the command returns an explicit `UNSUPPORTED_OPERATION` error instead of falling back to back navigation.
 - Works with active sessions and explicit selectors (`--platform`, `--device`, `--udid`, `--serial`).
-- Supported on Android emulator/device.
+- `keyboard status|get` is supported on Android emulator/device.
+- `keyboard dismiss` is supported on Android emulator/device and iOS simulator/device.
 
 ## Performance metrics
 
@@ -682,24 +831,43 @@ agent-device metrics --json
 ```
 
 - `perf` (alias: `metrics`) returns a session-scoped metrics JSON blob.
-- Current metric: `startup` from `open-command-roundtrip` sampling.
-- Sampling method: elapsed wall-clock time around each `open` command dispatch for the active session app target.
-- Unit: milliseconds (`ms`).
-- Platform support for current startup sampling: iOS simulator, iOS physical device, Android emulator/device.
-- `fps`, `memory`, and `cpu` are surfaced as unavailable placeholders in this release.
+- `startup` is sampled from `open-command-roundtrip`: elapsed wall-clock time around each `open` command dispatch for the active session app target.
+- Android app sessions with an active package also sample:
+  - `memory` from `adb shell dumpsys meminfo <package>` with values reported in kilobytes (`kB`)
+  - `cpu` from `adb shell dumpsys cpuinfo`, aggregated across matching package processes and reported as a recent percentage snapshot
+- Apple app sessions with an active bundle ID also sample:
+  - `memory` from process RSS snapshots reported in kilobytes (`kB`)
+  - `cpu` from process CPU usage snapshots reported as a recent percentage
+- Platform support:
+  - `startup`: iOS simulator, iOS physical device, Android emulator/device
+  - `memory` and `cpu`: Android emulator/device, macOS app sessions, and iOS simulators with an active app session (`open <app>` first)
+  - physical iOS devices still report `memory` and `cpu` as unavailable in this release
+- `fps` is still unavailable on all platforms in this release.
 - If no startup sample exists yet for the session, run `open <app|url>` first and retry `perf`.
+- If the session has no app package/bundle ID yet, `memory` and `cpu` remain unavailable until you `open <app>`.
 - Interpretation note: this startup metric is command round-trip timing and does not represent true first frame / first interactive app instrumentation.
+- CPU data is a lightweight process snapshot, so an idle app may legitimately read as `0`.
 
 ## Media and logs
 
 ```bash
 agent-device screenshot                 # Auto filename
 agent-device screenshot page.png        # Explicit screenshot path
+agent-device screenshot page.png --overlay-refs  # Draw current @eN refs and target rectangles onto the PNG
+agent-device screenshot textedit.png    # App-session window capture on macOS
+agent-device screenshot --fullscreen    # Force full-screen capture on macOS app sessions
+agent-device open --platform macos --surface desktop && agent-device screenshot desktop.png
 agent-device record start               # Start screen recording to auto filename
 agent-device record start session.mp4   # Start recording to explicit path
 agent-device record start session.mp4 --fps 30  # Override iOS device runner FPS
 agent-device record stop                # Stop active recording
 ```
+
+- Recordings always produce a video artifact. When touch visualization is enabled, they also produce a gesture telemetry sidecar that can be used for post-processing or inspection.
+- `screenshot --overlay-refs` captures a fresh full snapshot and burns visible `@eN` refs plus their target rectangles into the saved PNG.
+- In `--json` mode, each overlay ref also includes a screenshot-space `center` point for coordinate fallback like `press <x> <y>`.
+- Burned-in touch overlays are exported only on macOS hosts, because the overlay pipeline depends on Swift + AVFoundation helpers.
+- On Linux or other non-macOS hosts, `record stop` still succeeds and returns the raw video plus telemetry sidecar, and includes `overlayWarning` when burn-in overlays were skipped.
 
 **Session app logs (token-efficient debugging):** Logging is off by default in normal flows. Enable it on demand for debugging. Logs are written to a file so agents can grep instead of loading full output into context.
 
@@ -712,16 +880,21 @@ agent-device logs clear --restart       # Stop stream, clear log files, and star
 agent-device logs doctor                # Show logs backend/tool checks and readiness hints
 agent-device logs mark "before submit"  # Insert timeline marker into app.log
 agent-device network dump 25            # Parse recent HTTP(s) requests (method/url/status) from session app log
-agent-device network dump 25 all        # Include parsed headers/body when available (truncated)
+agent-device network dump 25 --include all # Include parsed headers/body when available (truncated)
 ```
 
 - Supported on iOS simulator, iOS physical device, and Android.
 - Preferred debug entrypoint: `logs clear --restart` for clean-window repro loops.
 - `logs start` appends to `app.log` and rotates to `app.log.1` when the file exceeds 5 MB.
 - `network dump [limit] [summary|headers|body|all]` parses recent HTTP(s) entries from `app.log`; `network log ...` is an alias.
+- Prefer `--include headers|body|all` when you want explicit detail level without relying on positional ordering.
+- On macOS, `logs` and `network dump` are app-scoped and parse Unified Logging output associated with the active session app.
 - Network dump limits: scans up to 4000 recent log lines, returns up to 200 entries, and truncates payload/header fields at 2048 characters.
+- Android `network dump` also surfaces logcat timestamps and can backfill status and duration from adjacent GIBSDK packet lines when the URL is logged separately.
 - Android log streaming automatically rebinds to the app PID after process restarts.
-- iOS log capture relies on Unified Logging signals (for example `os_log`); plain stdout/stderr output may be limited depending on app/runtime.
+- iOS simulator log capture now streams from inside the simulator with `simctl spawn <udid> log ...`, and `network dump` can recover recent simulator log history with `simctl log show` when the live app-log window is sparse.
+- iOS log capture still relies on Unified Logging signals (for example `os_log`); plain stdout/stderr output may be limited depending on app/runtime.
+- On iOS, `network dump` can return zero HTTP entries for real app activity when the app does not emit request metadata into Unified Logging. The response notes now distinguish between an empty repro window and a non-network app log window.
 - Retention knobs: set `AGENT_DEVICE_APP_LOG_MAX_BYTES` and `AGENT_DEVICE_APP_LOG_MAX_FILES` to override rotation limits.
 - Optional write-time redaction patterns: set `AGENT_DEVICE_APP_LOG_REDACT_PATTERNS` to a comma-separated regex list.
 
@@ -734,6 +907,7 @@ agent-device logs path
 # Then grep the path; -n adds line numbers for reference
 grep -n "Error\|Exception\|Fatal" ~/.agent-device/sessions/default/app.log
 grep -n -E "Error|Exception|Fatal|crash" ~/.agent-device/sessions/default/app.log
+grep -n -E "agent-device.*mark|before submit" ~/.agent-device/sessions/default/app.log
 
 # Last 50 lines only (bounded context)
 tail -50 ~/.agent-device/sessions/default/app.log
@@ -742,6 +916,8 @@ tail -50 ~/.agent-device/sessions/default/app.log
 - Use `-n` to include line numbers. Use `-E` for extended regex and `|` without escaping in the pattern.
 
 - Prefer targeted patterns (e.g. `Error`, `Exception`, your log tags) over reading the whole file.
+
+- `logs mark "before submit"` lines are prefixed with `[agent-device][mark][...]`, so grep for `agent-device.*mark` when you need timing markers back quickly.
 
 - iOS `record` works on simulators and physical devices.
 
@@ -753,7 +929,7 @@ tail -50 ~/.agent-device/sessions/default/app.log
 
 - Physical iOS device capture is best-effort: dropped frames are expected and true 60 FPS is not guaranteed even with `--fps 60`.
 
-- Physical-device capture defaults to uncapped (max available) FPS.
+- Physical-device capture defaults to 15 FPS.
 
 - `--fps <n>` (1-120) applies to physical iOS device recording as an explicit FPS cap.
 
@@ -930,6 +1106,10 @@ url: /agent-device/docs/installation.md
 npm install -g agent-device
 ```
 
+Interactive CLI runs periodically check for a newer published `agent-device` package in the background. When an upgrade is available, the CLI suggests reinstalling the package globally; that also refreshes the bundled `skills/` directory shipped with the release.
+
+Set `AGENT_DEVICE_NO_UPDATE_NOTIFIER=1` to disable the notice.
+
 ## Without installing
 
 ```bash
@@ -941,6 +1121,13 @@ npx agent-device open Settings --platform ios
 - Node.js 22+
 - Xcode for iOS simulator/device automation (`simctl` + `devicectl`)
 - Android SDK / ADB for Android
+- On macOS desktop targets, Swift 5.9+ / Xcode command-line tools are used to build the local `agent-device-macos-helper` on first use from source checkouts
+
+## macOS desktop notes
+
+- The macOS desktop path uses a local `agent-device-macos-helper` for permission checks (`settings permission ...`), alert handling, and helper-backed desktop snapshot surfaces (`frontmost-app`, `desktop`, `menubar`).
+- Source checkouts build the helper lazily on first use and cache it under `~/.agent-device/macos-helper/current/`.
+- Release distribution should ship a stable signed/notarized helper build so macOS trust/TCC state is tied to a durable code signature instead of an ad-hoc local binary.
 
 ## iOS physical device prerequisites
 
@@ -1018,24 +1205,32 @@ url: /agent-device/docs/quick-start.md
 Every device automation follows this pattern:
 
 ```bash
-# 1. Navigate
+# 1. Discover the installed app identifier when needed
+agent-device apps --platform ios # or android
+
+# 2. Navigate
 agent-device open SampleApp --platform ios # or android
 
-# 2. Snapshot to get element refs
+# 3. Snapshot to get element refs
 agent-device snapshot -i
 # Output:
 # @e1 [heading] "Sample App"
 # @e2 [button] "Settings"
+# [off-screen below] 2 interactive items: "Privacy", "Battery"
 
-# 3. Interact using refs
+# 4. Interact using refs
 agent-device click @e2
 
-# 4. Re-snapshot before next interactions
+# 5. Re-snapshot before next interactions, or use scrollintoview first if the target is off-screen
 agent-device snapshot -i
 
-# 5. Optional: see structural changes since last baseline
+# 6. Optional: see structural changes since last baseline
 agent-device diff snapshot
+# or, from snapshot-focused help/examples:
+agent-device snapshot --diff
 ```
+
+React Native dev or debug builds often show warning or error overlays that can intercept taps or hide the real UI state. Check for them near app open and after major transitions. If they are not the requested behavior, dismiss them and continue, but mention them in your summary if you saw them.
 
 Boot target if there is no ready device/simulator:
 
@@ -1050,11 +1245,14 @@ agent-device boot --platform android --device Pixel_9_Pro_XL --headless
 ## Common commands
 
 ```bash
+agent-device apps --platform android    # Discover the exact package name when unsure
 agent-device open SampleApp
-agent-device snapshot -i                 # Get interactive elements with refs
-agent-device diff snapshot               # First run initializes baseline; next runs show structural deltas
+agent-device snapshot -i                 # Get visible interactive elements with refs
+agent-device diff snapshot               # Preferred exploration form for structural deltas
 agent-device click @e2                   # Click by ref
 agent-device fill @e3 "test@example.com" # Clear then type (Android verifies and retries once if needed)
+agent-device press @e3
+agent-device type " more" --delay-ms 80  # Append into the already focused field
 agent-device get text @e1                # Get text content
 agent-device screenshot page.png         # Save to specific path
 agent-device install com.example.app ./build/app.apk     # Install app binary in-place
@@ -1072,6 +1270,7 @@ agent-device close
 - `.ipa` installs extract `Payload/*.app`; if multiple app bundles exist, `<app>` selects the target by bundle id or bundle name.
 
 If `open` fails because no booted simulator/emulator/device is available, run `boot --platform ios|android` and retry.
+If `open` fails because the app id is wrong or missing, run `apps` and retry with the discovered package or bundle id instead of guessing.
 
 ## Fast batching
 
@@ -1082,6 +1281,18 @@ agent-device batch \
   --platform ios \
   --steps-file /tmp/batch-steps.json \
   --json
+```
+
+Example batch payload for a known chat flow:
+
+```json
+[
+  { "command": "open", "positionals": ["ChatApp"], "flags": { "platform": "android" } },
+  { "command": "click", "positionals": ["label=\"Travel chat\""], "flags": {} },
+  { "command": "wait", "positionals": ["label=\"Message\"", "3000"], "flags": {} },
+  { "command": "fill", "positionals": ["label=\"Message\"", "Filed the expense"], "flags": {} },
+  { "command": "press", "positionals": ["label=\"Send\""], "flags": {} }
+]
 ```
 
 See [Batching](/agent-device/docs/batching.md) for payload format, failure handling, and best practices.
@@ -1107,6 +1318,7 @@ Navigate content that extends beyond the viewport:
 ```bash
 agent-device scroll down 0.5            # Scroll down half screen
 agent-device scroll up 0.3              # Scroll up 30%
+agent-device scroll down --pixels 320   # Scroll down by a fixed distance
 ```
 
 ## Settings helpers
@@ -1121,7 +1333,7 @@ agent-device settings location off
 agent-device settings permission grant camera
 ```
 
-Note: iOS `settings` commands are simulator-only.
+Note: iOS `settings` commands are simulator-only. On macOS, only `settings appearance ...` and `settings permission <grant|reset> <accessibility|screen-recording|input-monitoring>` are supported.
 
 ## JSON output
 
@@ -1185,6 +1397,24 @@ agent-device replay ~/.agent-device/sessions/e2e-2026-02-09T12-00-00-000Z.ad --s
 ```
 
 - Replay reads `.ad` scripts.
+
+## Run a lightweight `.ad` suite
+
+```bash
+agent-device test ./workflows
+agent-device test "./workflows/**/*.ad" --platform android
+agent-device test ./workflows --timeout 60000 --retries 1
+agent-device test ./workflows --artifacts-dir ./tmp/agent-device-artifacts
+```
+
+- `test` discovers `.ad` files from files, directories, or globs and runs them serially.
+- `context platform=...` inside each `.ad` file is the target source of truth for suite execution.
+- `--platform` is a filter for suite discovery; files without platform metadata are skipped when a filter is present.
+- `context timeout=...` and `context retries=...` can be declared per script; CLI flags override metadata. Retries are capped at `3`, and duplicate keys in the context header fail fast instead of silently overriding each other.
+- By default, suite artifacts are written under `.agent-device/test-artifacts/<run-id>/...`. Each attempt writes `replay.ad` and `result.txt`; failed attempts also keep copied logs and artifact files when the replay produced them.
+- Timeouts are cooperative: the runner marks the attempt failed at the timeout boundary, then gives the underlying replay a short grace period to stop before session cleanup.
+- The default text reporter prints the suite summary, failed tests, and passed-on-retry flaky tests; use `--verbose` to print every test result.
+- When `--fail-fast` and retries are both set, the current test still consumes its retries before the suite stops.
 
 ## Update stale selectors in replay scripts
 
@@ -1256,7 +1486,8 @@ Use `find` to locate elements by semantic attributes instead of raw refs.
 agent-device find "Settings" click
 agent-device find text "Sign In" click
 agent-device find label "Email" fill "user@example.com"
-agent-device find value "Search" type "query"
+agent-device find value "Search" click
+agent-device type "query"
 agent-device find role button click
 agent-device find id "com.example:id/login" click
 ```
@@ -1266,6 +1497,7 @@ Tips:
 - Use `find ... wait <timeoutMs>` to wait for UI to appear.
 - Combine with scoped snapshots using `snapshot -s "<label>"` for speed.
 - \[Android] If a matched node is not hittable, agent-device will click/focus the nearest hittable ancestor.
+- Use `fill` when you want find-plus-targeted text replacement in one step. Use `click` or `press` plus `type` when you need append semantics in the focused field.
 
 ## Response shape (click)
 
@@ -1337,7 +1569,7 @@ url: /agent-device/docs/snapshots.md
 
 # Snapshots
 
-Snapshots provide a structured view of the UI and generate stable refs.
+Snapshots provide a structured view of the UI and generate current-screen refs.
 
 ```bash
 agent-device snapshot                    # Full accessibility tree
@@ -1346,7 +1578,8 @@ agent-device snapshot -c                 # Compact (remove empty elements)
 agent-device snapshot -d 3               # Limit depth to 3 levels
 agent-device snapshot -s "Contacts"      # Scope to label/identifier
 agent-device snapshot -i -c -d 5         # Combine options
-agent-device diff snapshot               # Structural diff vs previous session baseline
+agent-device diff snapshot               # Preferred structural diff vs previous session baseline
+agent-device snapshot --diff             # Alias for the same diff operation
 ```
 
 | Option       | Description               |
@@ -1361,14 +1594,22 @@ It does not automatically switch to AX.
 
 ## Efficient snapshot usage
 
+- iOS and Android share the same mobile snapshot contract: visible-first output, actionable-now refs, and hidden list content communicated via discovery hints.
 - Default to `snapshot -i` for agent loops.
+- Default human-readable snapshot output is visible-first. Off-screen interactive content is collapsed into compact discovery summaries such as `[off-screen below] 3 interactive items: "Privacy", "Battery", "About"`.
+- When container ownership is known, hidden content is shown inline under the visible scroll/list container, for example `[content above scroll-area hidden]` or `[content below list hidden]`.
+- Those summaries intentionally show only a few labels for token efficiency. Use `snapshot --raw` when you need the full off-screen tree instead of the compact summary.
 - Add `-s "<label>"` (or `-s @ref`) to keep results screen-local.
 - Add `-d <depth>` when you only need upper hierarchy layers.
+- If `snapshot -i` returns 0 nodes on Android but the screen is visibly populated, trust `screenshot` as visual truth, wait briefly, then take one fresh `snapshot -i`.
+- If `snapshot -i -d <n>` says the interactive output is empty at that depth, retry once without `-d` before taking more shallow snapshots.
 - Re-snapshot after any UI mutation before reusing refs.
+- On Android after navigation or submit, if `snapshot -i` disagrees with the visible screen, trust `screenshot`, wait briefly, then take one fresh snapshot instead of looping stale snapshots.
 - Use `diff snapshot` between mutations to validate structural changes with lower output volume.
-- Keep `--raw` for troubleshooting only.
+- Use `snapshot --diff` when you discover the feature from snapshot help, but keep `diff snapshot` as the default exploration command.
+- Keep `--raw` for troubleshooting only when you need the full tree instead of visible-first output.
 
-`diff snapshot` behavior:
+`diff snapshot` and `snapshot --diff` behavior:
 
 - First run initializes baseline (`baselineInitialized: true` in JSON).
 - Later runs return unified-style lines (`+` added, `-` removed, unchanged context) and update baseline after each call.
@@ -1378,7 +1619,7 @@ It does not automatically switch to AX.
 ```bash
 agent-device snapshot -i
 # Output:
-# Snapshot: 44 nodes
+# Snapshot: 9 visible nodes (14 total)
 # @e1 [application] "Contacts"
 #   @e2 [window]
 #     @e3 [other]
@@ -1388,6 +1629,7 @@ agent-device snapshot -i
 #       @e7 [text] "Contacts"
 #     @e8 [other] "John Doe"
 #       @e9 [other] "John Doe"
+# [off-screen below] 2 interactive items: "All Contacts", "New List"
 ```
 
 ## Backends (iOS):
