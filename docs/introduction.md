@@ -17,11 +17,11 @@ For exploratory QA and bug-hunting workflows, see `skills/dogfood/SKILL.md` in t
 
 ## Platform support highlights
 
-- iOS core runner commands: `snapshot`, `snapshot --diff`, `diff snapshot`, `wait`, `click`, `fill`, `get`, `is`, `find`, `press`, `long-press`, `focus`, `type`, `scroll`, `scrollintoview`, `back`, `home`, `rotate`, `app-switcher`, `open` (app), `close`, `screenshot`, `apps`, `appstate`, `install`, `install-from-source`, `reinstall`, `trigger-app-event`.
+- iOS core runner commands: `snapshot`, `snapshot --diff`, `diff snapshot`, `wait`, `click`, `fill`, `get`, `is`, `find`, `press`, `long-press`, `focus`, `type`, `scroll`, `back`, `home`, `rotate`, `app-switcher`, `open` (app), `close`, `screenshot`, `apps`, `appstate`, `install`, `install-from-source`, `reinstall`, `trigger-app-event`.
 - iOS `appstate` is session-scoped on the selected target device.
 - iOS/tvOS simulator-only: `settings`, `push`, `clipboard`.
 - Apple simulators and macOS desktop app sessions: `alert`, `pinch`.
-- Session performance metrics: `perf`/`metrics` is available on iOS, macOS, and Android. Startup timing comes from `open` command round-trip duration. Android app sessions and Apple app sessions on macOS or iOS simulators also expose CPU and memory snapshots when an app identifier is available in the session.
+- Session performance metrics: `perf`/`metrics` is available on iOS, macOS, and Android. Startup timing comes from `open` command round-trip duration. Android app sessions and Apple app sessions on macOS, iOS simulators, or connected iOS devices also expose CPU and memory snapshots when an app identifier is available in the session.
 - iOS `record` supports simulators and physical devices.
   - Simulators use native `simctl io ... recordVideo`.
   - Physical devices use runner screenshot capture (`XCUIScreen.main.screenshot()` frames) stitched into MP4, so FPS is best-effort (not guaranteed 60 even with `--fps 60`).

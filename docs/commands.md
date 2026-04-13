@@ -49,8 +49,8 @@ agent-device app-switcher
 - In `batch`, steps that omit `platform` still inherit the parent batch `--platform`; lock-mode defaults do not override that parent setting.
 - Tenant-scoped daemon runs can pass `--tenant`, `--session-isolation tenant`, `--run-id`, and `--lease-id` to enforce lease admission.
 - Remote daemon clients can pass `--daemon-base-url http(s)://host:port[/base-path]` to skip local daemon discovery/startup and call a remote HTTP daemon directly.
-- Use `--daemon-auth-token <token>` (or `AGENT_DEVICE_DAEMON_AUTH_TOKEN`) when the remote daemon expects the shared daemon token over HTTP; the client sends it in both the JSON-RPC request token and HTTP auth headers.
-- `open <app> --remote-config <path> --relaunch` is the canonical remote Metro-backed launch flow for sandbox agents. The remote profile supplies the remote host + Metro settings, `open` prepares Metro locally when needed, derives platform runtime hints, and forwards them inline to the remote daemon before launch.
+- Use `--daemon-auth-token <token>` (or `AGENT_DEVICE_DAEMON_AUTH_TOKEN`) for non-loopback remote daemon URLs; the client sends it in both the JSON-RPC request token and HTTP auth headers.
+- `open <app> --remote-config <path> --relaunch` is the canonical remote Metro-backed launch flow for sandbox agents. The remote profile supplies the remote host + Metro settings, `open` prepares Metro locally when needed, auto-starts the local Metro companion tunnel when the remote bridge requires it, derives platform runtime hints, and forwards them inline to the remote daemon before launch.
 - `metro prepare --remote-config <path>` remains available for inspection and debugging. It prints JSON runtime hints to stdout, `--json` wraps them in the standard `{ success, data }` envelope, and `--runtime-file <path>` persists the same payload when callers need an artifact.
 - Android React Native relaunch flows require an installed package name for `open --relaunch`; install/reinstall the APK first, then relaunch by package. `open <apk|aab> --relaunch` is rejected because runtime hints are written through the installed app sandbox.
 - Remote daemon screenshots and recordings are downloaded back to the caller path, so `screenshot page.png` and `record start session.mp4` remain usable when the daemon runs on another host.
@@ -237,9 +237,6 @@ agent-device swipe 540 1500 540 500 120 --count 8 --pause-ms 30 --pattern ping-p
 agent-device longpress 300 500 800
 agent-device scroll down 0.5
 agent-device scroll down --pixels 320
-agent-device scrollintoview "Sign in"
-agent-device scrollintoview "Sign in" --max-scrolls 6
-agent-device scrollintoview @e42
 agent-device pinch 2.0          # zoom in 2x (Apple simulator or macOS app session)
 agent-device pinch 0.5 200 400 # zoom out at coordinates (Apple simulator or macOS app session)
 ```
@@ -255,12 +252,21 @@ Some Android images cannot enter non-ASCII text over shell input; in that case u
 `swipe` accepts an optional `durationMs` argument (default `250ms`, range `16..10000`).
 On iOS, swipe duration is clamped to a safe range (`16..60ms`) to avoid longpress side effects.
 `scroll` accepts either a relative amount (`0.5` means roughly half of the viewport on that axis) or `--pixels <n>` for a fixed-distance gesture. Large distances are clamped to the usable drag band so the gesture stays reliable across Android, iOS, and macOS.
-`scrollintoview` accepts plain text or a snapshot ref (`@eN`).
-Use `--max-scrolls <n>` to cap the number of scroll gestures explicitly.
-When omitted, Apple text/ref paths default to `48` scrolls; Android text mode defaults to `8` because each attempt re-dumps the full UI hierarchy.
-Ref mode re-snapshots after each swipe, returns a refreshed `currentRef` when it can track the target, and stops early when the target enters the safe viewport band or scrolling stops making progress.
 Default snapshot text output is visible-first, so off-screen interactive content is summarized instead of shown as tappable refs.
-`press @ref` and `fill @ref` fail fast when the target is off-screen; use `scrollintoview @ref` first, then retry with the returned `currentRef` or a fresh snapshot.
+When a target only appears in an off-screen summary, use `scroll <direction>` and then take a fresh `snapshot -i`. For repeated checks, a small shell loop is enough:
+
+```bash
+previous=''
+for _ in 1 2 3 4 5 6; do
+  current="$(agent-device snapshot -i)"
+  printf '%s\n' "$current"
+  printf '%s\n' "$current" | grep -q 'Sign in' && break
+  [ "$current" = "$previous" ] && break
+  previous="$current"
+  agent-device scroll down 0.5 >/dev/null
+done
+```
+
 `longpress` is supported on iOS and Android.
 `pinch` is supported on Apple simulators and macOS app sessions.
 
@@ -342,7 +348,7 @@ agent-device install com.example.app ./build/MyApp.app --platform ios
 - Useful for upgrade flows where you want to keep existing app data when supported by the platform.
 - Remote daemons automatically upload local app artifacts for `install`; prefix the path with `remote:` to use a daemon-side path verbatim.
 - Supported binary formats: Android `.apk`/`.aab`, iOS `.app`/`.ipa`.
-- `.aab` requires `bundletool` in `PATH`, or `AGENT_DEVICE_BUNDLETOOL_JAR=<path-to-bundletool-all.jar>` with `java` in `PATH`.
+- `.aab` requires `bundletool` in `PATH`, or `AGENT_DEVICE_BUNDLETOOL_JAR=<absolute-path-to-bundletool-all.jar>` with `java` in `PATH`.
 - Optional: `AGENT_DEVICE_ANDROID_BUNDLETOOL_MODE=<mode>` overrides bundletool `build-apks --mode` (default: `universal`).
 - `.ipa` installs by extracting `Payload/*.app`; if multiple app bundles exist, `<app>` is used as a bundle id/name hint to select one.
 
@@ -516,11 +522,11 @@ agent-device metrics --json
   - `cpu` from process CPU usage snapshots reported as a recent percentage
 - Platform support:
   - `startup`: iOS simulator, iOS physical device, Android emulator/device
-  - `memory` and `cpu`: Android emulator/device, macOS app sessions, and iOS simulators with an active app session (`open <app>` first)
-  - physical iOS devices still report `memory` and `cpu` as unavailable in this release
+  - `memory` and `cpu`: Android emulator/device, macOS app sessions, iOS simulators with an active app session (`open <app>` first), and iOS physical devices with an active app session
 - `fps` is still unavailable on all platforms in this release.
 - If no startup sample exists yet for the session, run `open <app|url>` first and retry `perf`.
 - If the session has no app package/bundle ID yet, `memory` and `cpu` remain unavailable until you `open <app>`.
+- On physical iOS devices, `perf` records a short `xcrun xctrace` Activity Monitor sample. Keep the device unlocked, connected, and the app active in the foreground while sampling.
 - Interpretation note: this startup metric is command round-trip timing and does not represent true first frame / first interactive app instrumentation.
 - CPU data is a lightweight process snapshot, so an idle app may legitimately read as `0`.
 
@@ -533,6 +539,9 @@ agent-device screenshot page.png --overlay-refs  # Draw current @eN refs and tar
 agent-device screenshot textedit.png    # App-session window capture on macOS
 agent-device screenshot --fullscreen    # Force full-screen capture on macOS app sessions
 agent-device open --platform macos --surface desktop && agent-device screenshot desktop.png
+agent-device diff screenshot --baseline baseline.png --out diff.png
+agent-device diff screenshot --baseline baseline.png current.png --out diff.png
+agent-device diff screenshot --baseline baseline.png --out diff.png --overlay-refs
 agent-device record start               # Start screen recording to auto filename
 agent-device record start session.mp4   # Start recording to explicit path
 agent-device record start session.mp4 --fps 30  # Override iOS device runner FPS
@@ -541,6 +550,10 @@ agent-device record stop                # Stop active recording
 
 - Recordings always produce a video artifact. When touch visualization is enabled, they also produce a gesture telemetry sidecar that can be used for post-processing or inspection.
 - `screenshot --overlay-refs` captures a fresh full snapshot and burns visible `@eN` refs plus their target rectangles into the saved PNG.
+- `diff screenshot` compares the current live screenshot to `--baseline`, or compares `--baseline` to an optional saved `current.png` path without requiring an active session, then prints ranked changed regions with screen-space rectangles, shape, size, density, average color, and luminance, and writes a diff PNG with a light grayscale current-screen context, red-tinted changed pixels, and outlined changed regions when `--out` is provided. JSON also includes normalized bounds.
+- If `tesseract` is installed, `diff screenshot` also adds best-effort OCR text deltas, movement clusters, and bbox size-change hints to the text and JSON output. OCR improves descriptions only; it does not change the pixel comparison or the diff PNG.
+- When OCR is available, `diff screenshot` also reports best-effort non-text visual deltas by masking OCR text boxes out of the diff and clustering remaining residuals. These are hints for icons, controls, and separators, not semantic icon recognition.
+- `diff screenshot --overlay-refs` additionally writes a separate current-screen overlay guide for live captures without using that annotated image for the pixel comparison. If current-screen refs intersect changed regions, the output lists the best ref matches under those regions. Saved-image comparisons do not have live accessibility refs, so `--overlay-refs` is unavailable when a `current.png` path is provided.
 - In `--json` mode, each overlay ref also includes a screenshot-space `center` point for coordinate fallback like `press <x> <y>`.
 - Burned-in touch overlays are exported only on macOS hosts, because the overlay pipeline depends on Swift + AVFoundation helpers.
 - On Linux or other non-macOS hosts, `record stop` still succeeds and returns the raw video plus telemetry sidecar, and includes `overlayWarning` when burn-in overlays were skipped.
@@ -631,9 +644,11 @@ agent-device metro prepare --remote-config ./agent-device.remote.json --json
 ```
 
 - `--remote-config <path>` points to a remote workflow profile that captures stable host + Metro settings.
-- `open --remote-config ... --relaunch` is the main agent flow. It prepares Metro locally, derives platform runtime hints, and forwards them inline to the remote daemon before launch.
+- `open --remote-config ... --relaunch` is the main agent flow. It prepares Metro locally, auto-manages the local Metro companion when the remote bridge is not already connected, derives platform runtime hints, and forwards them inline to the remote daemon before launch.
 - `snapshot`, `press`, `fill`, `screenshot`, and other normal commands can reuse the same `--remote-config` profile so agents do not need to repeat remote host/session selectors inline.
 - `metro prepare --remote-config ...` remains the inspection/debug path and can still write a `--runtime-file <path>` artifact when needed.
+- The local Metro companion runs on the same machine as the React Native project and Metro. Users no longer need to launch it as a separate manual command for standard `agent-device` remote Metro flows.
+- `close --remote-config ...` tears down the managed Metro companion for that profile, but it does not stop the user’s Metro server.
 
 ## Session inspection
 
